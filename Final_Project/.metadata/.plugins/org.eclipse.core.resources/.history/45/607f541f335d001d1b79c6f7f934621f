@@ -1,0 +1,314 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   MC2_main.c                                                   *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        05/11/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: CONTROL_ECU is responsible for all the processing            *
+ *                and decisions in the system like password checking,          *
+ *                open the door and activate the system alarm.                 *
+ *                                                                             *
+ *******************************************************************************/
+
+
+#include "std_types.h"
+#include "timer1.h"
+#include "uart.h"
+#include "twi.h"
+#include "dc_motor.h"
+#include "buzzer.h"
+#include "external_eeprom.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+/*******************************************************************************
+ *                                Definitions                                  *
+ *******************************************************************************/
+#define ALL_GOOD    0x00  /* used when the input password is same as the password at EEPROM */
+#define REDO        0x01  /* used when the input password is not same as the password at EEPROM */
+#define OPEN_DOOR   0x02  /* used when the user chooses to open the door after entering the right password*/
+#define CHANGE_PASS 0x03  /* used when the user chooses to change the password after entering the right password */
+#define ADD_PASS    0x04  /* used when the user wants to save the password at EEPROM */
+#define CHECK_PASS  0x05  /* used when the input needs to be checked if it is the same password at EEPROM */
+#define BUZZER_ON   0x06  /* used when the user enters wrong password three consecutive times */
+
+/* giving values to Timer1 configuration structure*/
+/* the least time we need to calculate to get less number of ISR is 3 seconds */
+/* 3 * ((F_CPU)/(Prescaler)) = ( 3 * 8 * 10^6 ) / (1024) = 23438 */
+Timer1_ConfigType TIMER1_Config = {0,23438,F_CPU_1024,COMPARE};
+
+/*******************************************************************************
+ *                                Global Variables                             *
+ *******************************************************************************/
+uint8  counter;               /* Variable to be used as a counter */
+uint16 timer_counter=0;       /* Variable to count the number of timer1 compare matches, used in call back function*/
+uint8  first_password[7];     /* Array to save the first password */
+uint8  second_password[7];    /* Array to save the second password */
+uint8  password[7];           /* Array to save password stored at EEPROM*/
+uint8  new_password[7];       /* Array to save any password sent from HMI ECU after main menu*/
+uint8  condition;             /* Global variable to save the type of operation which sent by HMI ECU */
+
+/*******************************************************************************
+ *                      Functions Prototypes                                   *
+ *******************************************************************************/
+
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+void count(void);
+/*
+ * Description :
+ * used to turn on buzzer when the user enters a wrong password 3 times in a row
+ * 1. turn on buzzer
+ * 2. starts the timer
+ * 3. after the required time it stops the buzzer and stops the timer
+ */
+void Ring_Buzzer(void);
+/*
+ * Description :
+ * used to get the password from the HMI ECU
+ * 1. compare the new password with the password stored at EEPROM
+ * 2. send message about the result to HMI ECU
+ */
+void verify_password(void);
+/*
+ * Description :
+ * used to turn on the DC Motor at the moment when the user decides to open the door
+ * 1. starts the timer
+ * 2. after the required time it stops the DC Motor then turn it to the other direction for the same time
+ *    and stop it again and stops the timer
+ */
+void Open_Door(void);
+/*
+ * Description :
+ * used to store password at EEPROM when the user enters a password in HMI ECU.
+ */
+void Add_Password(void);
+/*
+ * Description :
+ * used to compare two passwords sent from HMI ECU
+ * 1. receives the two passwords
+ * 2. if the passwords matched it will decide to store one of them in EEPROM
+ * 3. if Passwords are unmatched it will decide to send a message of the result to HMI ECU.
+ */
+void password_checking(void);
+
+/*******************************************************************************
+ *                      Functions Definitions                                  *
+ *******************************************************************************/
+
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+void count(void)
+{
+	/* increments the counter after getting a compare match */
+	timer_counter++;
+}
+
+/*
+ * Description :
+ * used to turn on buzzer when the user enters a wrong password 3 times in a row
+ * 1. turn on buzzer
+ * 2. starts the timer
+ * 3. after the required time it stops the buzzer and stops the timer
+ */
+void Ring_Buzzer(void)
+{
+	Buzzer_on(); /* turn on the buzzer */
+	Timer1_init(&TIMER1_Config);  /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=20){}    /* 60 seconds */
+	Buzzer_off();  /* turn off the buzzer */
+	Timer1_deInit();  /* disable the Timer1 */
+	condition=0;      /* clear the condition */
+	timer_counter=0;  /* reset counter to be ready for the next timer call */
+}
+
+/*
+ * Description :
+ * used to get the password from the HMI ECU
+ * 1. compare the new password with the password stored at EEPROM
+ * 2. send message about the result to HMI ECU
+ */
+void verify_password(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		/* store the received password byte by byte */
+		new_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		if(new_password[counter] != password[counter])
+		{
+			/* if the received password does not match the one in EEPROM then
+			   a message will be sent to HMI ECU with that result*/
+			UART_sendByte(REDO);
+			return;
+		}
+	}
+
+	/* if the two passwords are matched then a message with that result will be sent to HMI ECU */
+	UART_sendByte(ALL_GOOD);
+	condition = 0;  /* clear the condition */
+}
+
+/*
+ * Description :
+ * used to turn on the DC Motor at the moment when the user decides to open the door
+ * 1. starts the timer
+ * 2. after the required time it stops the DC Motor then turn it to the other direction for the same time
+ *    and stop it again and stops the timer
+ */
+void Open_Door(void)
+{
+	/* control the DC Motor to rotate clockwise with its max speed */
+	DcMotor_Rotate(CW,100);
+	Timer1_init(&TIMER1_Config); /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=5){}    /* 15 seconds */
+	Timer1_deInit();             /* disable the Timer1 */
+	timer_counter=0;             /* reset counter to be ready for the next timer call */
+
+	/* stop the DC Motor */
+	DcMotor_Rotate(STOP,0);
+	Timer1_init(&TIMER1_Config); /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=1){}    /* 3 seconds */
+	Timer1_deInit();             /* disable the Timer1 */
+	timer_counter=0;             /* reset counter to be ready for the next timer call */
+
+	/* control the DC Motor to rotate counter clockwise with its max speed */
+	DcMotor_Rotate(A_CW,100);
+	Timer1_init(&TIMER1_Config); /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=5){}    /* 15 seconds */
+
+	/* stop the DC Motor */
+	DcMotor_Rotate(STOP,0);
+	Timer1_deInit();            /* disable the Timer1 */
+	timer_counter=0;            /* reset counter to be ready for the next timer call */
+
+	condition = 0;              /* clear the condition */
+}
+
+/*
+ * Description :
+ * used to store password at EEPROM when the user enters a password in HMI ECU.
+ */
+void Add_Password(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		/* store the password byte by byte at EEPROM */
+		EEPROM_writeByte(0x0311+counter,password[counter]);
+		_delay_ms(100);
+	}
+	condition = 0;  /* clear the condition */
+}
+
+/*
+ * Description :
+ * used to compare two passwords sent from HMI ECU
+ * 1. receives the two passwords
+ * 2. if the passwords matched it will decide to store one of them in EEPROM
+ * 3. if Passwords are unmatched it will decide to send a message of the result to HMI ECU.
+ */
+void password_checking(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		/* store the first password byte by byte */
+		first_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* store the second password byte by byte */
+		second_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		if(first_password[counter] != second_password[counter])
+		{
+			/* if the two passwords unmatched then a message will be sent to HMI ECU with that result*/
+			UART_sendByte(REDO);
+			return;
+		}
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* if the two passwords are matched then one of them will be saved to store it in EEPROM */
+		password[counter] = first_password[counter];
+	}
+
+	/* store password in EEPROM */
+	Add_Password();
+
+	/* if the two passwords are matched then a message with that result will be sent to HMI ECU */
+	UART_sendByte(ALL_GOOD);
+
+	condition = 0;  /* clear the condition */
+}
+
+/*******************************************************************************
+ *                              Main Function                                  *
+ *******************************************************************************/
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	/* make count function as a call back function to be called after the timer gets a compare match*/
+	Timer1_setCallBack(count);
+
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600}; /* giving values to UART configuration structure*/
+	UART_init(&Uart_Config);  /* initialize UART driver by sending configuration structure*/
+
+	TWI_ConfigType Twi_Config = {0b00000010,0x02}; /* giving values to TWI configuration structure*/
+	TWI_init(&Twi_Config); /* initialize TWI driver by sending configuration structure*/
+
+	DcMotor_Init();  /* Initialize the DC Motor driver */
+	Buzzer_init();   /* Initialize the Buzzer driver */
+
+	while(1)
+	{
+		/* store the order sent from HMI ECU */
+		condition = UART_recieveByte();
+
+		if(condition==ADD_PASS)
+		{
+			password_checking();
+		}
+
+		if (condition==OPEN_DOOR)
+		{
+			Open_Door();
+		}
+
+		if (condition==CHANGE_PASS)
+		{
+			verify_password();
+		}
+
+		if (condition==CHECK_PASS)
+		{
+			verify_password();
+		}
+
+		if(condition==BUZZER_ON)
+		{
+			Ring_Buzzer();
+
+		}
+	}
+}
+

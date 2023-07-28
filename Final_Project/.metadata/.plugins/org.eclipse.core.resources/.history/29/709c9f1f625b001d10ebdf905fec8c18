@@ -1,0 +1,117 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   icu.c                                                        *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Source file for the TIMER1 driver                            *
+ *                                                                             *
+ *******************************************************************************/
+
+#include "timer1.h"
+#include "common_macros.h" /* To use the macros like SET_BIT */
+#include <avr/io.h> /* To use ICU/Timer1 Registers */
+#include <avr/interrupt.h> /* For ICU ISR */
+
+/*******************************************************************************
+ *                           Global Variables                                  *
+ *******************************************************************************/
+
+/* Global variables to hold the address of the call back function in the application */
+static volatile void (*g_callBackPtr)(void) = NULL_PTR;
+
+/*******************************************************************************
+ *                       Interrupt Service Routines                            *
+ *******************************************************************************/
+
+#if Config_Ptr->mode == 1
+ISR(TIMER1_COMPA_vect)
+{
+	if(g_callBackPtr != NULL_PTR)
+	{
+		/* Call the Call Back function in the application after the edge is detected */
+		(*g_callBackPtr)(); /* another method to call the function using pointer to function g_callBackPtr(); */
+	}
+}
+#else if Config_Ptr->mode == 0
+ISR(TIMER1_OVF_vect)
+{
+	if(g_callBackPtr != NULL_PTR)
+	{
+		/* Call the Call Back function in the application after the edge is detected */
+		(*g_callBackPtr)(); /* another method to call the function using pointer to function g_callBackPtr(); */
+	}
+}
+#endif
+
+/*******************************************************************************
+ *                      Functions Definitions                                  *
+ *******************************************************************************/
+/*
+ * Description : Function to initialize the ICU driver
+ * 	1. Set the required clock.
+ * 	2. Set the required edge detection.
+ * 	3. Enable the Input Capture Interrupt.
+ * 	4. Initialize Timer1 Registers
+ */
+void Timer1_init(const Timer1_ConfigType * Config_Ptr)
+{
+	TCNT1 = Config_Ptr->initial_value;		/* Set timer1 initial count to zero */
+#if Config_Ptr->mode == 1
+	OCR1A = Config_Ptr->compare_value;    /* Set the Compare value to 125 ((125/500) * 100 = 25%) */
+#endif
+
+#if Config_Ptr->mode == 1
+	TIMSK |= (1<<OCIE1A); /* Enable Timer1 Compare A Interrupt */
+#else if Config_Ptr->mode == 0
+	TIMSK |= (1<<TOIE1); /* Enable Timer1 Compare A Interrupt */
+#endif
+	/* Configure timer control register TCCR1A
+	 * 1. Disconnect OC1A and OC1B  COM1A1=0 COM1A0=0 COM1B0=0 COM1B1=0
+	 * 2. FOC1A=1 FOC1B=0
+	 * 3. CTC Mode WGM10=0 WGM11=0 (Mode Number 4)
+	 */
+	TCCR1A = (1<<FOC1A) | (1<<FOC1B);
+
+	/* Configure timer control register TCCR1B
+	 * 1. CTC Mode WGM12=1 WGM13=0 (Mode Number 4)
+	 * 2. Prescaler = F_CPU/8 CS10=0 CS11=1 CS12=0
+	 */
+#if Config_Ptr->mode == 1
+	TCCR1B = (1<<WGM12);
+#endif
+	TCCR1B = (TCCR1B & 0xF8) | (Config_Ptr->prescaler);
+
+}
+
+/*
+ * Description: Function to set the Call Back function address.
+ */
+void Timer1_setCallBack(void(*a_ptr)(void))
+{
+	/* Save the address of the Call back function in a global variable */
+	g_callBackPtr = a_ptr;
+}
+
+
+/*
+ * Description: Function to disable the Timer1 to stop the ICU Driver
+ */
+void Timer1_deInit(void)
+{
+	/* Clear All Timer1 Registers */
+	TCCR1A = 0;
+	TCCR1B = 0;
+	TCNT1 = 0;
+
+	/* Disable the Input Capture interrupt */
+#if Config_Ptr->mode == 1
+	TIMSK &= ~(1<<OCIE1A); /* Enable Timer1 Compare A Interrupt */
+#else if Config_Ptr->mode == 0
+	TIMSK &= ~(1<<TOIE1); /* Enable Timer1 Compare A Interrupt */
+#endif
+}
+
+

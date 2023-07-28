@@ -1,0 +1,114 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+
+#include "std_types.h"
+#include "timer1.h"
+#include "uart.h"
+#include "twi.h"
+#include "dc_motor.h"
+#include "buzzer.h"
+#include "external_eeprom.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+#define REDO_STEP1 0x01
+
+uint8 counter;
+uint8 first_password[7];
+uint8 second_password[7];
+uint8 password;
+uint8 flag = 0;
+
+
+/*
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+
+void count(void)
+{
+	counter++;
+}
+
+
+void Add_Password(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		EEPROM_writeByte(0x0311+counter, first_password[counter]);
+		_delay_ms(100);
+	}
+}
+
+//ECU2
+void password_checking(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		first_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		second_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		if(first_password[counter] != second_password[counter])
+		{
+			UART_sendByte(REDO_STEP1);
+			return;
+		}
+	}
+	Add_Password();
+}
+
+
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	Timer1_ConfigType TIMER1_Config = {0,255,NO_CLOCK,COMPARE};
+	Timer1_init(&TIMER1_Config);
+
+	Timer1_setCallBack(count);/* make count function as a call back function to be called after the timer gets
+	a compare match*/
+
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600}; /* giving values to Uart configration structure*/
+	UART_init(&Uart_Config); /* initialize uart driver by sending configration structure*/
+
+	TWI_ConfigType Twi_Config = {0b00000010,0x02}; /* giving values to Twi configration structure*/
+	TWI_init(&Twi_Config); /* initialize Twi driver by sending configration structure*/
+
+	DcMotor_Init();
+	Buzzer_init();
+
+	while(1)
+	{
+		while(flag==0)
+		{
+			password_checking();
+			flag = 1;
+		}
+	}
+}
+

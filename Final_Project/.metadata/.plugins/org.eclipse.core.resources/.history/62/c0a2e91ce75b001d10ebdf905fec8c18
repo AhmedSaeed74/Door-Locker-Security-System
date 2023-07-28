@@ -1,0 +1,95 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+#include "std_types.h"
+#include "lcd.h"
+#include "keypad.h"
+#include "timer1.h"
+#include "uart.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+uint8 counter;
+uint8 key;
+
+void step1(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+
+		_delay_ms(500); /* Press time */
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+	LCD_displayString("plz re-enter the :");
+	LCD_moveCursor(1,0);
+	LCD_displayString("same pass: ");
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+
+		_delay_ms(500); /* Press time */
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+	LCD_clearScreen();
+	LCD_displayString("done");
+}
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	/* Initialize both the LCD and ULTRASONIC drivers */
+	LCD_init();
+
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	while(1)
+	{
+
+
+		step1();
+
+	}
+}

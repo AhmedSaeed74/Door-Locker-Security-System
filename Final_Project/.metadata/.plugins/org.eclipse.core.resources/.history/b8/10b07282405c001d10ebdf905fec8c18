@@ -1,0 +1,138 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+#include "std_types.h"
+#include "lcd.h"
+#include "keypad.h"
+#include "timer1.h"
+#include "uart.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+uint8 counter;
+uint8 key;
+uint8 first_password[7];
+uint8 second_password[7];
+uint8 password;
+uint8 flag = 0;
+
+void step1(void)
+{
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while(KEYPAD_getPressedKey()==13){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+		first_password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	first_password[5] = '#';
+	first_password[6] = '\0';
+
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(first_password[counter]);
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+	LCD_displayString("plz re-enter the");
+	LCD_moveCursor(1,0);
+	LCD_displayString("same pass: ");
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while(KEYPAD_getPressedKey()==13){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+
+		second_password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	second_password[5] = '#';
+	second_password[6] = '\0';
+
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(second_password[counter]);
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+	LCD_clearScreen();
+}
+
+//ECU2
+void password_checking(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		if(first_password[counter] != second_password[counter])
+		{
+            step1();
+		}
+	}
+}
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	Timer1_ConfigType TIMER1_Config = {0,255,NO_CLOCK,COMPARE};
+	Timer1_init(&TIMER1_Config);
+
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600}; /* giving values to Uart configration structure*/
+
+	UART_init(&Uart_Config); /* initialize uart driver by sending configration structure*/
+
+	/* Initialize both the LCD and ULTRASONIC drivers */
+	LCD_init();
+
+	while(1)
+	{
+		while(flag==0)
+		{
+			step1();
+			password_checking();
+			flag = 1;
+		}
+	}
+}

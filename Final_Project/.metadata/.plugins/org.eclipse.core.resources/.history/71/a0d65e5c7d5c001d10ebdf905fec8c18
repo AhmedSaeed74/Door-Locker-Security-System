@@ -1,0 +1,321 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+#include "std_types.h"
+#include "lcd.h"
+#include "keypad.h"
+#include "timer1.h"
+#include "uart.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+#define ALL_GOOD    0x00
+#define REDO        0x01
+#define OPEN_DOOR   0x02
+#define CHANGE_PASS 0x03
+#define ADD_PASS    0x04
+
+Timer1_ConfigType TIMER1_Config = {0,255,F_CPU_1024,COMPARE};
+
+uint8 counter;
+uint16 timer_counter;
+uint8 key;
+uint8 first_password[7];
+uint8 second_password[7];
+uint8 password[7];
+uint8 flag = 0;
+
+void step1(void);
+void step2(void);
+void step3(void);
+void step4(void);
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+
+void count(void)
+{
+	timer_counter++;
+}
+
+
+/*
+ * Description :
+ * used to display door status at the moment when the user decides to open the door
+ * 1. starts the timer
+ * 2. after the required time it clears the screen and stops the timer
+ */
+void Open_Door(void)
+{
+	LCD_displayString("Door Unlocking");
+	Timer1_init(&TIMER1_Config);
+	while(timer_counter!=458){} /* 15 seconds */
+	LCD_clearScreen();
+	Timer1_deInit(); /* stops timer */
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+
+	LCD_displayString("Door is Opened");
+	Timer1_init(&TIMER1_Config);
+	while(timer_counter!=92){} /* 3 seconds */
+	LCD_clearScreen();
+	Timer1_deInit(); /* stops timer */
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+
+	LCD_displayString("Door is Locking");
+	Timer1_init(&TIMER1_Config);
+	while(timer_counter!=458){} /* 15 seconds */
+
+	LCD_clearScreen();
+	Timer1_deInit();
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+	//mismatches=0;
+}
+
+void step1(void)
+{
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while(KEYPAD_getPressedKey()==13){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+		first_password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	first_password[5] = '#';
+	first_password[6] = '\0';
+
+	UART_sendByte(ADD_PASS);
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(first_password[counter]);
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+	LCD_displayString("plz re-enter the");
+	LCD_moveCursor(1,0);
+	LCD_displayString("same pass: ");
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while(KEYPAD_getPressedKey()==13){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+
+		second_password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	second_password[5] = '#';
+	second_password[6] = '\0';
+
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(second_password[counter]);
+	}
+
+	while(KEYPAD_getPressedKey()!=13){}
+	LCD_clearScreen();
+}
+
+void step3(void)
+{
+	LCD_clearScreen();
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while((KEYPAD_getPressedKey()==13) || (KEYPAD_getPressedKey()=='+')){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+		password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	password[5] = '#';
+	password[6] = '\0';
+
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+
+	UART_sendByte(OPEN_DOOR);
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(password[counter]);
+	}
+
+	if(UART_recieveByte()==REDO)
+	{
+		step2();
+	}
+
+	else
+	{
+		Open_Door();
+	}
+}
+
+void step4(void)
+{
+	LCD_clearScreen();
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		while((KEYPAD_getPressedKey()==13) || (KEYPAD_getPressedKey()=='-')){}
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+		password[counter] = key;
+		_delay_ms(500); /* Press time */
+	}
+
+	password[5] = '#';
+	password[6] = '\0';
+
+	UART_sendByte(CHANGE_PASS);
+
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(password[counter]);
+	}
+
+	if(UART_recieveByte()==REDO)
+	{
+		step2();
+	}
+
+	else
+	{
+		flag = 0;
+	}
+}
+
+void step2(void)
+{
+	LCD_moveCursor(0,0);
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("+ : Open Door");
+
+	/* Display the temperature value every time at same position */
+	LCD_moveCursor(1,0);
+
+	/* Display this string "Distance =    cm" only once on LCD at the first row */
+	LCD_displayString("- : Change Pass");
+
+	while((KEYPAD_getPressedKey()!='+') && (KEYPAD_getPressedKey()!='-')){}
+	key = KEYPAD_getPressedKey();
+
+	if(key == '+')
+	{
+		step3();
+	}
+	else if (key == '-')
+	{
+		step4();
+	}
+}
+
+
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	Timer1_setCallBack(count);/* make count function as a call back function to be called after the timer gets
+	a compare match*/
+
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600}; /* giving values to Uart configration structure*/
+
+	UART_init(&Uart_Config); /* initialize uart driver by sending configration structure*/
+
+	/* Initialize both the LCD and ULTRASONIC drivers */
+	LCD_init();
+
+	while(1)
+	{
+		while(flag==0)
+		{
+			step1();
+
+            if(UART_recieveByte()==REDO)
+            {
+			    flag = 0;
+            }
+
+            else
+            {
+            	flag = 1;
+            }
+		}
+		step2();
+	}
+}

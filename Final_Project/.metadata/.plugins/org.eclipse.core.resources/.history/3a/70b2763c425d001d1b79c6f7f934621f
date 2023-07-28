@@ -1,0 +1,538 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   MC1_main.c                                                   *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        05/11/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: HMI_ECU is just responsible of the interaction with          *
+ *                the user, just take inputs through keypad and display        *
+ *                messages on the LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+#include "std_types.h"
+#include "lcd.h"
+#include "keypad.h"
+#include "timer1.h"
+#include "uart.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+/*******************************************************************************
+ *                                Definitions                                  *
+ *******************************************************************************/
+#define ALL_GOOD    0x00  /* used when the input password is same as the password at EEPROM */
+#define REDO        0x01  /* used when the input password is not same as the password at EEPROM */
+#define OPEN_DOOR   0x02  /* used when the user chooses to open the door after entering the right password*/
+#define CHANGE_PASS 0x03  /* used when the user chooses to change the password after entering the right password */
+#define ADD_PASS    0x04  /* used when the user wants to save the password at EEPROM */
+#define CHECK_PASS  0x05  /* used when the input needs to be checked if it is the same password at EEPROM */
+#define BUZZER_ON   0x06  /* used when the user enters wrong password three consecutive times */
+
+/***************         Compare Mode          **************/
+/* giving values to Timer1 configuration structure*/
+/* the least time we need to calculate to get less number of ISR is 3 seconds */
+/* 3 * ((F_CPU)/(Prescaler)) = ( 3 * 8 * 10^6 ) / (1024) = 23438 */
+Timer1_ConfigType TIMER1_Config = {0,23438,F_CPU_1024,COMPARE};
+
+/****************        Normal Mode         ****************/
+/* giving values to Timer1 configuration structure*/
+/* the least time we need to calculate to get less number of ISR is 3 seconds */
+/* 3 * ((F_CPU)/(Prescaler)) = ( 3 * 8 * 10^6 ) / (1024) = 23438 */
+/* TCNT! = 65535 - 23438 = 42098 */
+/* Timer1_ConfigType TIMER1_Config = {42098,65535,F_CPU_1024,NORMAL}; */
+
+/*******************************************************************************
+ *                                Global Variables                             *
+ *******************************************************************************/
+uint8  counter;              /* Variable to be used as a counter */
+uint16 timer_counter;        /* Variable to count the number of timer1 compare matches, used in call back function*/
+uint8  key;                  /* Variable to save the key pressed from the keypad */
+uint8  first_password[7];    /* Array to save the first password */
+uint8  second_password[7];   /* Array to save the second password */
+uint8  password[7];          /* Array to save any password after main menu*/
+uint8  flag = 0;             /* Global variable to decide which menu to show */
+uint8  mismatches = 0;       /* Variable to save number of mismatches*/
+
+/*******************************************************************************
+ *                      Functions Prototypes                                   *
+ *******************************************************************************/
+
+/*
+ * Description :
+ * used to get the password from the user at beginning
+ * 1. move the cursor to required place
+ * 2. display message
+ * 3. gets the password number by number from the keypad
+ * 4. sends the first password to the control ECU through UART
+ * 5. asks for entering the password again then sends it to the control ECU
+ */
+void First_Menu(void);
+/*
+ * Description :
+ * used to show the main menu
+ * 1. get the required order which is open door or change password
+ * 2. gets the password number by number from the keypad
+ * 3. sends the password to the control ECU through UART to compare it with the stored password
+ * 4. if the password matched another function will be called depending on user choice in number 1.
+ * 5. if the passwords unmatched the user will be asked to enter the correct password
+ * 6. if number of mismatches = 3 the buzzer will ring and error message will be shown on LCD
+ */
+void Main_Menu(void);
+/*
+ * Description :
+ * used to get the password from user after choosing open door from main menu
+ * then sends it to control ECU byte by byte through UART
+ */
+void Open_Door(void);
+/*
+ * Description :
+ * used to get the password from user after choosing change password from main menu
+ * then sends it to control ECU byte by byte through UART
+ */
+void change_password(void);
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+void Count(void);
+/*
+ * Description :
+ * used to display error message when the user enters a wrong password 3 consecutive times
+ * 1. display error message for 1 second
+ * 2. after the required time it clears the screen and stops the timer
+ */
+void error_message(void);
+/*
+ * Description :
+ * used when the user enters a wrong password
+ * to display try again for 1 second
+ */
+void wrong_password_message(void);
+/*
+ * Description :
+ * used to get the password from the user at main menu only
+ * 1. move the cursor to required place
+ * 2. display message
+ * 3. gets the password number by number from the keypad
+ */
+void take_password(void);
+/*
+ * Description :
+ * used to display door status at the moment when the user decides to open the door
+ * 1. starts the timer
+ * 2. shows the state of the door
+ * 3. after the required time it clears the screen and stops the timer
+ */
+void Door_Unlocking(void);
+
+/*******************************************************************************
+ *                      Functions Definitions                                  *
+ *******************************************************************************/
+
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+
+void Count(void)
+{
+	/* increments the counter after getting a compare match */
+	timer_counter++;
+}
+
+/*
+ * Description :
+ * used when the user enters a wrong password
+ * to display try again for 1 minute
+ */
+void wrong_password_message(void)
+{
+	/* Display string "wrong Password" on LCD at the first row
+	 * then display string "Please Try Again" on LCD at the second row
+	 * for a minute to let the user know about his wrong password */
+	LCD_displayString("Wrong Password");
+	LCD_moveCursor(1,0);
+	LCD_displayString("Please Try Again");
+	_delay_ms(1000);
+	LCD_clearScreen();
+}
+
+/*
+ * Description :
+ * used to display error message when the user enters a wrong password 3 consecutive times
+ * 1. display error message for 1 second
+ * 2. after the required time it clears the screen and stops the timer
+ */
+void error_message(void)
+{
+	UART_sendByte(BUZZER_ON); /* sends a message to MC2 to start the buzzer*/
+	LCD_displayString("ERROR !!!"); /* Display error message on LCD at the first row */
+	Timer1_init(&TIMER1_Config);  /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=20){} /* 60 seconds */
+	LCD_clearScreen();
+	Timer1_deInit();  /* disable the Timer1 */
+	mismatches=0;     /* clear number of mismatches */
+	timer_counter=0;  /* reset counter to be ready for the next timer call */
+}
+
+/*
+ * Description :
+ * used to get the password from the user at main menu only
+ * 1. move the cursor to required place
+ * 2. display message
+ * 3. gets the password number by number from the keypad
+ */
+void take_password(void)
+{
+	LCD_clearScreen();
+	/* Display this string "plz enter pass :" on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* move cursor to the second line to get password from user */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* take any input from user except '+' , '-' and ENTER to avoid wrong character input */
+		while((KEYPAD_getPressedKey()==13) || (KEYPAD_getPressedKey()=='+') || (KEYPAD_getPressedKey()=='-')){}
+
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch hashed using '*' */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+		password[counter] = key;  /* store the password at its array */
+		_delay_ms(500); /* Press time */
+	}
+
+	password[5] = '#';  /* put hash sign in the end of the array to send it with Uart*/
+	password[6] = '\0'; /* end of string */
+
+	/* any key rather than ENTER will not be accepted after entering the password which is 5 numbers */
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+}
+
+/*
+ * Description :
+ * used to display door status at the moment when the user decides to open the door
+ * 1. starts the timer
+ * 2. shows the state of the door
+ * 3. after the required time it clears the screen and stops the timer
+ */
+void Door_Unlocking(void)
+{
+	/* Display this string "Door Unlocking" on LCD at the first row */
+	LCD_displayString("Door Unlocking");
+	Timer1_init(&TIMER1_Config); /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=5){} /* 15 seconds */
+	LCD_clearScreen();
+	Timer1_deInit(); /* disable the Timer1 */
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+
+	/* Display this string "Door is Opened" on LCD at the first row */
+	LCD_displayString("Door is Opened");
+	Timer1_init(&TIMER1_Config); /* initialize Timer1 driver by sending configuration structure*/
+	while(timer_counter!=1){} /* 3 seconds */
+	LCD_clearScreen();
+	Timer1_deInit(); /* disable the Timer1 */
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+
+	/* Display this string "Door is Locking" on LCD at the first row */
+	LCD_displayString("Door is Locking");
+	Timer1_init(&TIMER1_Config);
+	while(timer_counter!=5){} /* 15 seconds */
+
+	LCD_clearScreen();
+	Timer1_deInit(); /* disable the Timer1 */
+	timer_counter=0; /* reset counter to be ready for the next timer call */
+	mismatches=0;    /* clear number of mismatches */
+}
+
+/*
+ * Description :
+ * used to get the password from the user at beginning
+ * 1. move the cursor to required place
+ * 2. display message
+ * 3. gets the password number by number from the keypad
+ * 4. sends the first password to the control ECU through UART
+ * 5. asks for entering the password again then sends it to the control ECU
+ */
+void First_Menu(void)
+{
+	/* Display this string "plz enter pass :" on LCD at the first row */
+	LCD_displayString("plz enter pass :");
+
+	/* move cursor to the second line to get password from user */
+	LCD_moveCursor(1,0);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* take any input from user except ENTER to avoid wrong character input */
+		while(KEYPAD_getPressedKey()==13){}
+
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		key = KEYPAD_getPressedKey();
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch hashed using '*' */
+		}
+		else
+		{
+			LCD_displayCharacter(key);   /* display the pressed keypad switch */
+		}
+		first_password[counter] = key;   /* store the first password at its array */
+		_delay_ms(500); /* Press time */
+	}
+
+	first_password[5] = '#';   /* put hash sign in the end of the array to send it with Uart*/
+	first_password[6] = '\0';  /* end of string */
+
+	UART_sendByte(ADD_PASS);   /* send message to control ECu to ask it to add password */
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(first_password[counter]); /* send the first password to control ECU byte by byte */
+	}
+
+	/* any key rather than ENTER will not be accepted after entering the password which is 5 numbers */
+	while(KEYPAD_getPressedKey()!=13){}
+
+	LCD_clearScreen();
+
+	/* Display this string "plz re-enter the" on LCD at the first row */
+	LCD_displayString("plz re-enter the");
+
+	/* move cursor to the second line to get password from user */
+	LCD_moveCursor(1,0);
+
+	/* Display this string "same pass: " on LCD at the first row */
+	LCD_displayString("same pass: ");
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* take any input from user except ENTER to avoid wrong character input */
+		while(KEYPAD_getPressedKey()==13){}
+
+		/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+		key = KEYPAD_getPressedKey();
+
+		if((key <= 9) && (key >= 0))
+		{
+			LCD_displayCharacter('*');   /* display the pressed keypad switch hashed using '*' */
+		}
+		else
+		{
+			LCD_displayCharacter(key); /* display the pressed keypad switch */
+		}
+
+		second_password[counter] = key;  /* store the second password at its array */
+		_delay_ms(500); /* Press time */
+	}
+
+	second_password[5] = '#';   /* put hash sign in the end of the array to send it with Uart*/
+	second_password[6] = '\0';  /* end of string */
+
+	for(counter=0;counter<5;counter++)
+	{
+		UART_sendByte(second_password[counter]); /* send the second password to control ECU byte by byte */
+	}
+
+	/* any key rather than ENTER will not be accepted after entering the password which is 5 numbers */
+	while(KEYPAD_getPressedKey()!=13){}
+	LCD_clearScreen();
+}
+
+/*
+ * Description :
+ * used to show the main menu
+ * 1. get the required order which is open door or change password
+ * 2. gets the password number by number from the keypad
+ * 3. sends the password to the control ECU through UART to compare it with the stored password
+ * 4. if the password matched another function will be called depending on user choice in number 1.
+ * 5. if the passwords unmatched the user will be asked to enter the correct password
+ * 6. if number of mismatches = 3 the buzzer will ring and error message will be shown on LCD
+ */
+void Main_Menu(void)
+{
+	LCD_moveCursor(0,0);
+	/* Display this string "+ : Open Door" on LCD at the first row */
+	LCD_displayString("+ : Open Door");
+
+	LCD_moveCursor(1,0);
+
+	/* Display this string "- : Change Pass" on LCD at the first row */
+	LCD_displayString("- : Change Pass");
+
+	/* take any input from user except '+' and '-' to avoid wrong character input */
+	while((KEYPAD_getPressedKey()!='+') && (KEYPAD_getPressedKey()!='-')){}
+
+	/* Get the pressed key number, if any switch pressed for more than 500 ms it will considered more than one press */
+	key = KEYPAD_getPressedKey();
+
+	if(key == '+')
+	{
+		/* call the function that controls door opening */
+		Open_Door();
+
+		/* check if the password does not match with the one stored at EEPROM */
+		while(UART_recieveByte()==REDO)
+		{
+			/* increments number of mismatches */
+			mismatches++;
+
+			/* when number of mismatches reach 3, the buzzer will ring and error message will be displayed on LCD */
+			if (mismatches == 3)
+			{
+				error_message();
+				return;   /* return to main menu */
+			}
+
+			else
+			{
+				/* if number of mismatches is still less than 3, then the user will be
+				 * asked again to enter correct password */
+				wrong_password_message();
+				Open_Door();
+			}
+
+		}
+
+		/* when the user enters the correct password and number of mismatches
+		 * is still less than 3 the door will be unlocked*/
+		UART_sendByte(OPEN_DOOR);
+		Door_Unlocking();
+	}
+
+	else if (key == '-')
+	{
+		/* call the function that controls password changing */
+		change_password();
+
+		/* check if the password does not match with the one stored at EEPROM */
+		while(UART_recieveByte()==REDO)
+		{
+			/* increments number of mismatches */
+			mismatches++;
+
+			/* when number of mismatches reach 3, the buzzer will ring and error message will be displayed on LCD */
+			if (mismatches == 3)
+			{
+				error_message();
+				return;   /* return to main menu */
+			}
+
+			else
+			{
+				/* if number of mismatches is still less than 3, then the user will be
+				 * asked again to enter correct password */
+				wrong_password_message();
+				change_password();
+			}
+		}
+
+		/* when the user enters the correct password and number of mismatches
+		 * is still less than 3 the first menu will be displayed to get
+		 * the password which the user wants to add*/
+		flag = 0;
+	}
+}
+
+/*
+ * Description :
+ * used to get the password from user after choosing open door from main menu
+ * then sends it to control ECU byte by byte through UART
+ */
+void Open_Door(void)
+{
+	/* gets the password number by number from the keypad */
+	take_password();
+
+	/* sends a message to control ECU to get ready for comparing passwords */
+	UART_sendByte(CHECK_PASS);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* sends the password entered byte by byte to control ECU through UART */
+		UART_sendByte(password[counter]);
+	}
+}
+
+/*
+ * Description :
+ * used to get the password from user after choosing change password from main menu
+ * then sends it to control ECU byte by byte through UART
+ */
+void change_password(void)
+{
+	/* gets the password number by number from the keypad */
+	take_password();
+
+	/* sends a message to control ECU to get ready for comparing passwords */
+	UART_sendByte(CHANGE_PASS);
+
+	for(counter=0;counter<5;counter++)
+	{
+		/* sends the password entered byte by byte to control ECU through UART */
+		UART_sendByte(password[counter]);
+	}
+}
+
+/*******************************************************************************
+ *                              Main Function                                  *
+ *******************************************************************************/
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	/* make count function as a call back function to be called after the timer gets a compare match*/
+	Timer1_setCallBack(Count);
+
+	/* giving values to UART configuration structure*/
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600};
+
+	/* initialize UART driver by sending configuration structure*/
+	UART_init(&Uart_Config);
+
+	/* Initialize the LCD driver */
+	LCD_init();
+
+	while(1)
+	{
+		while(flag==0)
+		{
+			/* display the first menu to enter the password twice */
+			First_Menu();
+
+			if(UART_recieveByte()==REDO)
+			{
+				/* if the control ECU returned a message of unmatched passwords
+            	  then wrong message will be displayed then the first menu will be displayed again */
+				wrong_password_message();
+				flag = 0;
+			}
+
+			else
+			{
+				/* in case of matched passwords then the flag value will be changed to
+				 * move from the first menu to main menu */
+				flag = 1;
+			}
+		}
+
+		/* display the main menu to ask user if he wants to open door or change password */
+		Main_Menu();
+	}
+}

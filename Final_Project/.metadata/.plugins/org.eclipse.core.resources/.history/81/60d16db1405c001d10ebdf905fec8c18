@@ -1,0 +1,22 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+
+#include <avr/io.h> /* To use the SREG register */
+
+int main(void)
+{
+
+}

@@ -1,0 +1,165 @@
+/*******************************************************************************
+ *                                                                             *
+ * [FILE NAME]:   main.c                                                       *
+ *                                                                             *
+ * [AUTHOR]:      Ahmed Saeed                                                  *
+ *                                                                             *
+ * [DATE]:        11/10/2022                                                   *
+ *                                                                             *
+ * [DESCRIPTION]: Implement system to measure the distance using               *
+ *                Ultrasonic sensor HC-SR04 following its specifications.      *
+ *                Measure the distance using the Ultrasonic sensor             *
+ *                then show it on LCD.                                         *
+ *                                                                             *
+ *******************************************************************************/
+
+
+#include "std_types.h"
+#include "timer1.h"
+#include "uart.h"
+#include "twi.h"
+#include "dc_motor.h"
+#include "buzzer.h"
+#include "external_eeprom.h"
+#include <avr/io.h> /* To use the SREG register */
+#include "util/delay.h" /* For the delay functions */
+
+#define ALL_GOOD    0x00
+#define REDO        0x01
+#define OPEN_DOOR   0x10
+#define CHANGE_PASS 0x11
+
+Timer1_ConfigType TIMER1_Config = {0,255,F_CPU_1024,COMPARE};
+
+uint8 counter;
+uint16 timer_counter=0;
+uint8 first_password[7];
+uint8 second_password[7];
+uint8 password[7];
+uint8 new_password[7];
+uint8 flag = 0;
+
+
+/*
+ * Description :
+ * Call back function
+ * 1. called when the timer gets a compare match to increment the counter
+ */
+
+void count(void)
+{
+	timer_counter++;
+}
+
+void verify_password(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		new_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		if(new_password[counter] != password[counter])
+		{
+			UART_sendByte(REDO);
+			return;
+		}
+	}
+	//should be open door func
+	DcMotor_Rotate(CW,100);
+	Timer1_init(&TIMER1_Config);
+	while(counter!=458){}
+	Timer1_deInit();
+	timer_counter=0;
+
+	DcMotor_Rotate(STOP,100);
+	Timer1_init(&TIMER1_Config);
+	while(counter!=92){}
+	Timer1_deInit();
+	timer_counter=0;
+
+	DcMotor_Rotate(A_CW,100);
+	Timer1_init(&TIMER1_Config);
+	while(counter!=458){}
+	DcMotor_Rotate(STOP,100);
+	Timer1_deInit();
+	timer_counter=0;
+}
+
+void Add_Password(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		EEPROM_writeByte(0x0311+counter,password[counter]);
+		_delay_ms(100);
+	}
+}
+
+//ECU2
+void password_checking(void)
+{
+	for(counter=0;counter<5;counter++)
+	{
+		first_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		second_password[counter]= UART_recieveByte();
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		if(first_password[counter] != second_password[counter])
+		{
+			UART_sendByte(REDO);
+			return;
+		}
+	}
+
+	for(counter=0;counter<5;counter++)
+	{
+		password[counter] = first_password[counter];
+	}
+
+	Add_Password();
+	flag = 1;
+	UART_sendByte(ALL_GOOD);
+}
+
+
+
+int main(void)
+{
+
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	Timer1_setCallBack(count);/* make count function as a call back function to be called after the timer gets
+	a compare match*/
+
+	UART_ConfigType Uart_Config = {EIGHT_BITS,NONE,ONE_BIT,9600}; /* giving values to Uart configration structure*/
+	UART_init(&Uart_Config); /* initialize uart driver by sending configration structure*/
+
+	TWI_ConfigType Twi_Config = {0b00000010,0x02}; /* giving values to Twi configration structure*/
+	TWI_init(&Twi_Config); /* initialize Twi driver by sending configration structure*/
+
+	DcMotor_Init();
+	Buzzer_init();
+
+	while(1)
+	{
+		while(flag==0)
+		{
+			password_checking();
+		}
+
+		if (UART_recieveByte()==OPEN_DOOR)
+		{
+			verify_password();
+		}
+
+	}
+}
+
